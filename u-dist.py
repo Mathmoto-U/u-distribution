@@ -155,32 +155,6 @@ CUSTOM_CSS = """
         background: #ecfdf5;
         border-color: #a7f3d0;
     }
-
-    /* 右カラム：累計試行回数カード */
-    .stat-cards-grid {
-        margin-bottom: 12px;
-    }
-    .stat-card {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 14px;
-        padding: 12px 18px;
-        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-    }
-    .stat-card-top {
-        font-size: 0.85rem;
-        font-weight: 700;
-        color: #475569;
-    }
-    .stat-card-main {
-        font-size: 1.55rem;
-        font-weight: 800;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-        line-height: 1.15;
-    }
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -356,26 +330,11 @@ def render_left_result_banner_html(latest_sum: Optional[int]) -> str:
     """
 
 
-def render_stat_cards_html() -> str:
-    """右カラム上部の累計試行回数カードのHTMLを生成する"""
-    N = st.session_state.total_trials
-    return f"""
-    <div class="stat-cards-grid">
-        <div class="stat-card">
-            <div class="stat-card-top">累計試行回数</div>
-            <div class="stat-card-main" style="color:#0f172a;">
-                {N:,} <span style="font-size:0.85rem; font-weight:600; color:#64748b;">回</span>
-            </div>
-        </div>
-    </div>
-    """
-
-
 # ============================================================================
-# 5. Plotlyによるヒストグラム＋正規分布曲線の描画
+# 5. Plotlyによる相対度数ヒストグラム＋正規分布曲線の描画
 # ============================================================================
 def create_histogram_figure(bins: List[Dict]) -> go.Figure:
-    """標本平均のヒストグラムと正規分布 N(3.5, 35/1200) を描画する"""
+    """標本平均の相対度数ヒストグラムと正規分布 N(3.5, 35/1200) を描画する"""
     N = st.session_state.total_trials
     w = st.session_state.bin_step / 100.0  # 標本平均の階級幅 (0.10, 0.05, 0.02)
 
@@ -384,14 +343,18 @@ def create_histogram_figure(bins: List[Dict]) -> go.Figure:
 
     visible_bins = [b for b in bins if b["cont_end"] >= x_min and b["cont_start"] <= x_max]
 
-    max_bar_count = max([b["count"] for b in visible_bins], default=0)
-    theo_peak = (N * w / (THEO_STD * math.sqrt(2 * math.pi))) if N > 0 else 0.0
-    raw_max_y = max(max_bar_count, theo_peak if st.session_state.show_normal_curve else 0.0, 5.0)
-    y_max = math.ceil(raw_max_y * 1.18)
+    # 各階級の相対度数 (度数 / N)
+    rel_freqs = [(b["count"] / N) if N > 0 else 0.0 for b in visible_bins]
+    max_bar_rel = max(rel_freqs, default=0.0)
+
+    # 正規分布の理論上の相対度数ピーク (階級幅 w × 確率密度ピーク)
+    theo_peak = w / (THEO_STD * math.sqrt(2 * math.pi))
+    raw_max_y = max(max_bar_rel, theo_peak)
+    y_max = raw_max_y * 1.20
 
     fig = go.Figure()
 
-    # 1. ヒストグラムの棒グラフ
+    # 1. ヒストグラムの棒グラフ（相対度数）
     centers = [b["center"] for b in visible_bins]
     counts = [b["count"] for b in visible_bins]
     widths = [b["actual_width"] * 0.88 for b in visible_bins]
@@ -407,24 +370,22 @@ def create_histogram_figure(bins: List[Dict]) -> go.Figure:
     ]
     border_widths = [2.2 if b["contains_latest"] else 1.0 for b in visible_bins]
 
-    expected_counts = []
-    pct_list = []
+    expected_rel_freqs = []
     for b in visible_bins:
         c_val = b["center"]
         z = (c_val - THEO_MEAN) / THEO_STD
         pdf = (1.0 / (THEO_STD * math.sqrt(2 * math.pi))) * math.exp(-0.5 * z * z)
-        exp_c = N * b["actual_width"] * pdf if N > 0 else 0.0
-        expected_counts.append(exp_c)
-        pct_list.append((b["count"] / N * 100.0) if N > 0 else 0.0)
+        exp_rel = b["actual_width"] * pdf
+        expected_rel_freqs.append(exp_rel)
 
-    custom_data = np.column_stack([range_labels, pct_list, expected_counts])
+    custom_data = np.column_stack([range_labels, counts, expected_rel_freqs])
 
     fig.add_trace(
         go.Bar(
             x=centers,
-            y=counts,
+            y=rel_freqs,
             width=widths,
-            name="実測度数",
+            name="相対度数",
             marker=dict(
                 color=bar_colors,
                 line=dict(color=border_colors, width=border_widths),
@@ -432,26 +393,21 @@ def create_histogram_figure(bins: List[Dict]) -> go.Figure:
             customdata=custom_data,
             hovertemplate=(
                 "<b>標本平均: %{customdata[0]}</b><br>"
-                "実測度数: <b>%{y:,}回</b> (%{customdata[1]:.1f}%)<br>"
-                "正規近似期待値: 約 %{customdata[2]:.1f}回"
+                "相対度数: <b>%{y:.3f}</b> (%{customdata[1]:,}回)<br>"
+                "理論相対度数: 約 %{customdata[2]:.3f}"
                 "<extra></extra>"
             ),
         )
     )
 
-    # 2. 正規分布の理論曲線オーバーレイ
+    # 2. 正規分布の理論曲線オーバーレイ（相対度数スケール）
     if st.session_state.show_normal_curve:
         x_curve = np.linspace(x_min, x_max, 400)
         z_curve = (x_curve - THEO_MEAN) / THEO_STD
         pdf_curve = (1.0 / (THEO_STD * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * z_curve**2)
 
-        if N > 0:
-            y_curve = N * w * pdf_curve
-            line_dash = "solid"
-        else:
-            peak_pdf = 1.0 / (THEO_STD * math.sqrt(2.0 * math.pi))
-            y_curve = (y_max * 0.75) * (pdf_curve / peak_pdf)
-            line_dash = "dash"
+        y_curve = w * pdf_curve
+        line_dash = "solid" if N > 0 else "dash"
 
         fig.add_trace(
             go.Scatter(
@@ -474,8 +430,8 @@ def create_histogram_figure(bins: List[Dict]) -> go.Figure:
     )
 
     fig.update_layout(
-        height=390,
-        margin=dict(l=48, r=20, t=20, b=42),
+        height=440,
+        margin=dict(l=52, r=20, t=20, b=42),
         plot_bgcolor="#ffffff",
         paper_bgcolor="#ffffff",
         xaxis=xaxis_config,
@@ -484,9 +440,10 @@ def create_histogram_figure(bins: List[Dict]) -> go.Figure:
             gridcolor="#f1f5f9",
             zeroline=True,
             zerolinecolor="#cbd5e1",
+            tickformat=".2f",
             tickfont=dict(size=11, color="#64748b"),
         ),
-        showlegend=False,  # 上部の謎の凡例アイコンを完全に非表示
+        showlegend=False,
         bargap=0.08,
         hovermode="closest",
     )
@@ -575,11 +532,8 @@ with col_left:
         )
 
 
-# ---------------- 右カラム: 統計メトリクス & ヒストグラム ----------------
+# ---------------- 右カラム: 相対度数ヒストグラム ----------------
 with col_right:
-    # 累計試行回数カード
-    st.markdown(render_stat_cards_html(), unsafe_allow_html=True)
-
     with st.container(border=True):
         # 階級幅セレクター（3段階）と正規分布曲線トグルを横並びに配置
         top_bar_cols = st.columns([6.5, 3.5])
